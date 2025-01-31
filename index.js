@@ -161,15 +161,39 @@ app.get('/api/data', (req, res) => {
 });
 
 app.post('/api/register', async (req, res) => {
-    const { name, email, password, role, college } = req.body;
+    const { firstName, lastName, email, password, role, college } = req.body;
     try {
-        const user = new User({ name, email, password, role, college, verified: false });
+        const existingUser = await User.findOne({ email });
+        if (existingUser) {
+            return res.status(400).json({ message: 'Email already registered', error: true });
+        }
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        const user = new User({ firstName, lastName, email, password, role, college, verified: false, registerOtp: otp });
         await user.save();
-        const token = jwt.sign({ userId: user._id, email: user.email }, secretKey, { expiresIn: '1h' });
-        await sendVerificationEmail(user, token);
-        res.status(201).send('User registered. Please check your email to verify your account.');
+        await sendOtpEmail(email, otp);
+        res.status(201).json({ message: 'User registered. Please check your email to verify your account.', success: true });
     } catch (error) {
-        res.status(500).send('Server error');
+        console.log(error);
+        res.status(500).json({ message: error.message, error: true });
+    }
+});
+
+app.post('/api/send-otp', async (req, res) => {
+    const { email } = req.body;
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    try {
+        const user = await User.findOne({ email });
+        if (user.lastOtp && new Date() - user.lastOtp < 60000) {
+            return res.status(400).json({ message: 'Please wait before sending OTP again', error: true });
+        }
+        user.registerOtp = otp;
+        user.lastOtp = new Date();
+        await user.save();
+        await sendOtpEmail(email, otp);
+        res.json({ message: 'OTP sent successfully', success: true });
+    } catch (error) {
+        console.log(error)
+        res.status(500).json({ message: 'Error sending OTP', error: true });
     }
 });
 
@@ -179,7 +203,7 @@ app.get('/api/verify-email', async (req, res) => {
         const decoded = jwt.verify(token, secretKey);
         const user = await User.findById(decoded.userId);
         if (!user) {
-            return res.status(404).send('User not found');
+            return res.status(404).json({ message: 'User not found', error: true });
         }
         const college = await College.findOne({ shortcode: user.college });
         const emailDomain = user.email.split('@')[1];
@@ -189,9 +213,9 @@ app.get('/api/verify-email', async (req, res) => {
             user.verified = false;
         }
         await user.save();
-        res.send('Email verified successfully');
+        res.json({ message: 'Email verified successfully', success: true });
     } catch (error) {
-        res.status(400).send('Invalid or expired token');
+        res.status(400).json({ message: 'Invalid or expired token', error: true });
     }
 });
 
@@ -199,160 +223,173 @@ app.post('/api/login', async (req, res) => {
     const { email, password } = req.body;
     try {
         const user = await User.findOne({ email });
+        if (!user.verified) {
+            return res.status(403).json({ message: 'User not verified', error: true, userId: user._id });
+        }
         if (!user || user.password !== password) {
-            return res.status(401).send('Invalid credentials');
+            return res.status(401).json({ message: 'Invalid credentials', error: true });
         }
         const token = jwt.sign({ userId: user._id, role: user.role }, secretKey, { expiresIn: '1h' });
-        res.json({ token });
+        res.json({ token, success: true });
     } catch (error) {
-        res.status(500).send('Server error');
+        res.status(500).json({ message: error.message, error: true });
+    }
+});
+
+app.post('/api/login-user', async (req, res) => {
+    const { email, password } = req.body;
+    try {
+        const user = await User.findOne({ email });
+        if (!user.verified) {
+            return res.status(403).json({ message: 'User not verified', error: true, userId: user._id });
+        }
+        if (!user || user.password !== password) {
+            return res.status(401).json({ message: 'Invalid credentials', error: true });
+        }
+        const userObj = user.toObject();
+        delete userObj.password;
+        res.json({ user: userObj, success: true });
+    } catch (error) {
+        res.status(500).json({ message: error.message, error: true });
     }
 });
 
 const authenticate = (req, res, next) => {
     const token = req.header('Authorization').replace('Bearer ', '');
     if (!token) {
-        return res.status(401).send('Access denied');
+        return res.status(401).json({ message: 'Access denied', error: true });
     }
     try {
         const decoded = jwt.verify(token, secretKey);
         req.user = decoded;
         next();
     } catch (error) {
-        res.status(400).send('Invalid token');
+        res.status(400).json({ message: 'Invalid token', error: true });
     }
 };
 
-app.post('/api/verify', authenticate, async (req, res) => {
+const checkRole = (roles) => {
+    return (req, res, next) => {
+        if (!roles.includes(req.user.role)) {
+            return res.status(403).json({ message: 'Access denied', error: true });
+        }
+        next();
+    };
+};
+
+app.post('/api/verify', authenticate, checkRole(['admin', 'college']), async (req, res) => {
     const { userId, verificationData } = req.body;
     try {
         const user = await User.findById(userId);
         if (!user) {
-            return res.status(404).send('User not found');
+            return res.status(404).json({ message: 'User not found', error: true });
         }
         const college = await College.findOne({ shortcode: user.college });
         const emailDomain = verificationData.email.split('@')[1];
         if (college.emailExtensions.includes(emailDomain)) {
             user.verified = true;
             await user.save();
-            return res.send('User verified via email');
+            return res.json({ message: 'User verified via email', success: true });
         } else {
-            if (req.user.role === 'admin' || req.user.role === 'collegeAdmin') {
+            if (req.user.role === 'admin' || req.user.role === 'college') {
                 user.verificationData = verificationData;
                 user.verified = true;
                 await user.save();
-                return res.send('User manually verified by admin');
+                return res.json({ message: 'User manually verified by admin', success: true });
             }
-            return res.status(403).send('Manual verification required by admin');
+            return res.status(403).json({ message: 'Manual verification required by admin', error: true });
         }
     } catch (error) {
-        res.status(500).send('Server error');
+        res.status(500).json({ message: error.message, error: true });
     }
 });
 
 app.get('/api/products', async (req, res) => {
     try {
         const products = await Product.find();
-        res.json(products);
+        res.json({ products, success: true });
     } catch (error) {
-        res.status(500).send('Server error');
+        res.status(500).json({ message: error.message, error: true });
     }
 });
 
-app.post('/api/products', authenticate, async (req, res) => {
-    if (req.user.role !== 'admin') {
-        return res.status(403).send('Access denied');
-    }
+app.post('/api/products', authenticate, checkRole(['admin', 'college']), async (req, res) => {
     const product = new Product(req.body);
     try {
         await product.save();
-        res.status(201).send(product);
+        res.status(201).json({ product, success: true });
     } catch (error) {
-        res.status(400).send(error);
+        res.status(400).json({ message: error.message, error: true });
     }
 });
 
-app.put('/api/products/:id', authenticate, async (req, res) => {
-    if (req.user.role !== 'admin') {
-        return res.status(403).send('Access denied');
-    }
+app.put('/api/products/:id', authenticate, checkRole(['admin', 'college']), async (req, res) => {
     try {
         const product = await Product.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
         if (!product) {
-            return res.status(404).send('Product not found');
+            return res.status(404).json({ message: 'Product not found', error: true });
         }
-        res.send(product);
+        res.json({ product, success: true });
     } catch (error) {
-        res.status(400).send(error);
+        res.status(400).json({ message: error.message, error: true });
     }
 });
 
-app.delete('/api/products/:id', authenticate, async (req, res) => {
-    if (req.user.role !== 'admin') {
-        return res.status(403).send('Access denied');
-    }
+app.delete('/api/products/:id', authenticate, checkRole(['admin', 'college']), async (req, res) => {
     try {
         const product = await Product.findByIdAndDelete(req.params.id);
         if (!product) {
-            return res.status(404).send('Product not found');
+            return res.status(404).json({ message: 'Product not found', error: true });
         }
-        res.send(product);
+        res.json({ product, success: true });
     } catch (error) {
-        res.status(500).send(error);
+        res.status(500).json({ message: error.message, error: true });
     }
 });
 
 app.get('/api/colleges', async (req, res) => {
     const { search } = req.query;
     try {
-        const query = search ? { name: { $regex: search, $options: 'i' } } : {};
+        const query = search ? { $or: [{ name: { $regex: search, $options: 'i' } }, { shortCode: { $regex: search, $options: 'i' } }] } : {};
         const colleges = await College.find(query);
-        res.json(colleges);
+        res.json({ colleges, success: true });
     } catch (error) {
-        res.status(500).send('Server error');
+        console.log(error);
+        res.status(500).json({ message: error.message, error: true });
     }
 });
 
-app.post('/api/colleges', authenticate, async (req, res) => {
-    if (req.user.role !== 'admin') {
-        return res.status(403).send('Access denied');
-    }
+app.post('/api/colleges', authenticate, checkRole(['admin', 'college']), async (req, res) => {
     const college = new College(req.body);
     try {
         await college.save();
-        res.status(201).send(college);
+        res.status(201).json({ college, success: true });
     } catch (error) {
-        res.status(400).send(error);
+        res.status(400).json({ message: error.message, error: true });
     }
 });
 
-app.put('/api/colleges/:id', authenticate, async (req, res) => {
-    if (req.user.role !== 'admin') {
-        return res.status(403).send('Access denied');
-    }
+app.put('/api/colleges/:id', authenticate, checkRole(['admin', 'college']), async (req, res) => {
     try {
         const college = await College.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
         if (!college) {
-            return res.status(404).send('College not found');
+            return res.status(404).json({ message: 'College not found', error: true });
         }
-        res.send(college);
+        res.json({ college, success: true });
     } catch (error) {
-        res.status(400).send(error);
+        res.status(400).json({ message: error.message, error: true });
     }
 });
 
-app.delete('/api/colleges/:id', authenticate, async (req, res) => {
-    if (req.user.role !== 'admin') {
-        return res.status(403).send('Access denied');
-    }
+app.delete('/api/colleges/:id', authenticate, checkRole(['admin', 'college']), async (req, res) => {
     try {
         const college = await College.findByIdAndDelete(req.params.id);
         if (!college) {
-            return res.status(404).send('College not found');
+            return res.status(404).json({ message: 'College not found', error: true });
         }
-        res.send(college);
+        res.json({ college, success: true });
     } catch (error) {
-        res.status(500).send(error);
+        res.status(500).json({ message: error.message, error: true });
     }
 });
 
@@ -360,62 +397,57 @@ app.post('/api/test', async (req, res) => {
     const { email } = req.body;
     try {
         await sendCustomEmail(email);
-        res.send('Custom email sent successfully');
+        res.json({ message: 'Custom email sent successfully', success: true });
     } catch (error) {
         console.error(error);
-        res.status(500).send('Server error');
-    }
-});
-
-app.post('/api/send-otp', async (req, res) => {
-    const { email } = req.body;
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    try {
-        await sendOtpEmail(email, otp);
-        // Save OTP to user record or a temporary store
-        await User.updateOne({ email }, { otp });
-        res.send('OTP sent successfully');
-    } catch (error) {
-        res.status(500).send('Error sending OTP');
+        res.status(500).json({ message: error.message, error: true });
     }
 });
 
 app.post('/api/verify-otp', async (req, res) => {
     const { email, otp } = req.body;
     try {
-        const user = await User.findOne({ email, otp });
+        const user = await User.findOne({ email, registerOtp: otp });
         if (!user) {
-            return res.status(400).send('Invalid OTP');
+            return res.status(400).json({ message: 'Invalid OTP or No User', error: true });
         }
-        user.verified = true;
-        user.otp = null;
+        const college = await College.findOne({ shortCode: user.college });
+        const emailDomain = user.email.split('@')[1];
+        let idCard = false;
+        if (college.emailExtensions.includes(emailDomain)) {
+            user.verified = true;
+        } else {
+            idCard = true;
+            user.verified = false;
+        }
+        user.registerOtp = null;
+        user.lastOtp = null;
         await user.save();
-        res.send('Email verified successfully');
+        res.json({ message: 'Email verified successfully', success: true, idCard });
     } catch (error) {
-        res.status(500).send('Server error');
+        console.log(error);
+        res.status(500).json({ message: error.message, error: true });
     }
 });
 
 app.post('/api/upload-id', async (req, res) => {
-    const { email, college } = req.body;
-    const idCard = req.files.idCard;
-    const uploadPath = path.join(__dirname, 'uploads', idCard.name);
+    const { email, college, idCardUrl } = req.body;
+    try {
+        const user = await User.findOne({ email });
 
-    idCard.mv(uploadPath, async (err) => {
-        if (err) {
-            return res.status(500).send('Error uploading ID card');
+        if (!user) {
+            return res.status(404).json({ message: 'User not found', error: true });
         }
-        try {
-            const user = await User.findOne({ email });
-            user.college = college;
-            user.idCardPath = uploadPath;
-            user.verified = false;
-            await user.save();
-            res.send('ID card uploaded successfully. Please wait for manual verification.');
-        } catch (error) {
-            res.status(500).send('Server error');
-        }
-    });
+
+        user.college = college;
+        user.verificationData.idCard = idCardUrl;
+        user.verified = false;
+
+        await user.save();
+        res.json({ message: 'ID card URL updated successfully. Please wait for manual verification.', success: true });
+    } catch (error) {
+        res.status(500).json({ message: error.message, error: true });
+    }
 });
 
 app.listen(port, () => {

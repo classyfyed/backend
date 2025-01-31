@@ -1,8 +1,10 @@
 const mongoose = require('mongoose');
 
 const userSchema = new mongoose.Schema({
-    name: String,
-    email: String,
+    email: {
+        type: String,
+        unique: true,
+    },
     password: String,
     firstName: String,
     lastName: String,
@@ -12,14 +14,15 @@ const userSchema = new mongoose.Schema({
         enum: ['student', 'teacher', 'admin', 'college'],
         required: true,
     },
-    college: { type: mongoose.Schema.Types.ObjectId, ref: 'College' },
+    college: String,
     verified: Boolean,
     verificationData: {
         idCard: String,
-        emailExtension: String,
         teacherId: String,
         proofDocument: String,
     },
+    registerOtp: Number,
+    lastOtp: Date
 });
 
 module.exports = mongoose.model('User', userSchema);
