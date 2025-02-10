@@ -152,7 +152,7 @@ const sampleData = {
 };
 
 app.get('/', (req, res) => {
-    res.send('Jai Srimannarayana!! Testing Dev Branch.');
+    res.send('Jai Srimannarayana!!');
 });
 
 app.get('/api/data', (req, res) => {
