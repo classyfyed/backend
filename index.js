@@ -102,7 +102,6 @@ const sendOtpEmail = (email, otp) => {
     });
 };
 
-// Sample data for the API
 const sampleData = {
     recommended: [
         {
